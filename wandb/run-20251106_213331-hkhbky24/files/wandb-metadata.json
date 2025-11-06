@@ -1,0 +1,16 @@
+{
+  "os": "Windows-10-10.0.19044-SP0",
+  "python": "CPython 3.12.4",
+  "startedAt": "2025-11-06T20:33:31.665297Z",
+  "program": "D:\\University\\zneus\\ZNEUS-Projekt1\\neural_network.py",
+  "codePath": "neural_network.py",
+  "codePathLocal": "neural_network.py",
+  "git": {
+    "remote": "https://github.com/NiceeTV/ZNEUS-Projekt1.git",
+    "commit": "6d1fdc7eff6a130bc939a0f2fb5db4b83b35241d"
+  },
+  "root": "D:\\University\\zneus\\ZNEUS-Projekt1",
+  "host": "DESKTOP-473981L",
+  "executable": "D:\\University\\zneus\\ZNEUS-Projekt1\\.venv\\Scripts\\python.exe",
+  "writerId": "xq8hlf1mtck2t5skz90qvnahpwd7oj7a"
+}

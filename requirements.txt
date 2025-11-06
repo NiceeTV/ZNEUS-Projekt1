@@ -9,3 +9,6 @@ jupyterlab
 notebook
 shapely
 wandb
+torch
+torchvision
+torchaudio
