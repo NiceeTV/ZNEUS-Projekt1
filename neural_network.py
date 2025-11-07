@@ -1,3 +1,5 @@
+import itertools
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -12,6 +14,10 @@ import numpy as np
 
 WANDB_PROJECT_NAME = "zneus-project-1"
 IS_WANDB = True
+RANDOM_SEED = 42
+
+np.random.seed(RANDOM_SEED)
+torch.manual_seed(RANDOM_SEED)
 
 EPOCH = 50
 BATCH_SIZE = 128
@@ -33,21 +39,103 @@ class CSVDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-class SimpleNN(nn.Module):
+class SimpleNN_dropout(nn.Module):
     def __init__(self, input_size: int):
-        super(SimpleNN, self).__init__()
+        super(SimpleNN_dropout, self).__init__()
         self.net = nn.Sequential(
             nn.Linear(input_size, 128),
             nn.LeakyReLU(0.1),
+            nn.Dropout(0.1),
             nn.Linear(128, 64),
             nn.LeakyReLU(0.1),
+            nn.Dropout(0.3),
             nn.Linear(64, 32),
             nn.LeakyReLU(0.1),
             nn.Linear(32, 1)
         )
-        
+
     def forward(self, x):
         return self.net(x)
+
+
+class SimpleNN_batch_norm(nn.Module):
+    def __init__(self, input_size: int):
+        super(SimpleNN_batch_norm, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_size, 128),
+            nn.BatchNorm1d(128),
+            nn.LeakyReLU(0.3),
+
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.LeakyReLU(0.1),
+
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.LeakyReLU(0.1),
+
+            nn.Linear(32, 1)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class SimpleNN_Res(nn.Module): #skip connections
+    def __init__(self, input_size: int):
+        super(SimpleNN_Res, self).__init__()
+        self.fc1 = nn.Linear(input_size, 128)
+        self.act1 = nn.LeakyReLU(0.3)
+
+        self.fc2 = nn.Linear(128, 64)
+        self.act2 = nn.LeakyReLU(0.1)
+
+        self.fc3 = nn.Linear(64, 32)
+        self.act3 = nn.LeakyReLU(0.1)
+
+        self.out = nn.Linear(32, 1)
+
+        #projection for skip connections
+        self.skip_proj = nn.Linear(input_size, 64)
+
+    def forward(self, x):
+        #first layer
+        x1 = self.act1(self.fc1(x))
+
+        #skip connection: input x + projection to 64
+        skip = self.skip_proj(x)
+        x2 = self.act2(self.fc2(x1) + skip) #residual connection
+
+        #next layer
+        x3 = self.act3(self.fc3(x2))
+
+        out = self.out(x3)
+        return out
+
+
+class SimpleNN_Bottleneck(nn.Module):
+    def __init__(self, input_size: int, bottleneck_size: int = 16):
+        super(SimpleNN_Bottleneck, self).__init__()
+
+        self.fc1 = nn.Linear(input_size, 128)
+        self.act1 = nn.LeakyReLU(0.3)
+
+        #bottleneck layer
+        self.fc2 = nn.Linear(128, bottleneck_size)
+        self.act2 = nn.LeakyReLU(0.1)
+
+        #output layer
+        self.fc3 = nn.Linear(bottleneck_size, 32)
+        self.act3 = nn.LeakyReLU(0.1)
+
+        self.out = nn.Linear(32, 1)
+
+    def forward(self, x):
+        x1 = self.act1(self.fc1(x))
+        x2 = self.act2(self.fc2(x1))
+        x3 = self.act3(self.fc3(x2))
+        out = self.out(x3)
+        return out
 
 
 def get_inverse_transformed(y, y_transformer=None):
@@ -92,9 +180,10 @@ def evaluate(eloader: DataLoader, model, loss_fn, y_transformer=None, is_test=Fa
     return total_test_loss/num_of_batches, total_test_loss_original/num_of_batches, mse_losses, rmse_losses, num_of_batches
 
 
-def train(train: CSVDataset, train_loader: DataLoader, eval_loader: DataLoader, loss_fn, transformer=None) -> (any, List[float], List[float]):
-    model = SimpleNN(train.X.shape[1]).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=LR)
+def train(train: CSVDataset, train_loader: DataLoader, eval_loader: DataLoader, loss_fn, transformer=None, model=None, optimizer=None) -> (any, List[float], List[float]):
+    model = model if model else SimpleNN_Bottleneck(train.X.shape[1]).to(device) #in tuning we pass the model, else its base
+
+    optimizer = optimizer if optimizer else optim.Adam(model.parameters(), lr=LR) #same with optimizer
     train_mse, eval_mse = [], []
     train_rmse, eval_rmse = [], []
 
@@ -160,9 +249,9 @@ def get_datasets(path: str) -> List[CSVDataset]:
 
 def _main(path: str, transformer):
     train_df, test_df, eval_df = get_datasets(path)
-    train_loader = DataLoader(train_df, batch_size=BATCH_SIZE, shuffle=True)
-    test_loader = DataLoader(test_df, batch_size=BATCH_SIZE, shuffle=True)
-    eval_loader = DataLoader(eval_df, batch_size=BATCH_SIZE, shuffle=True)
+    train_loader = DataLoader(train_df, batch_size=BATCH_SIZE, shuffle=True, worker_init_fn=lambda worker_id: np.random.seed(RANDOM_SEED + worker_id))
+    test_loader = DataLoader(test_df, batch_size=BATCH_SIZE, shuffle=True, worker_init_fn=lambda worker_id: np.random.seed(RANDOM_SEED + worker_id))
+    eval_loader = DataLoader(eval_df, batch_size=BATCH_SIZE, shuffle=True, worker_init_fn=lambda worker_id: np.random.seed(RANDOM_SEED + worker_id))
 
     loss_fn = nn.MSELoss()
     model, train_mse, eval_mse, train_rmse, eval_rmse = train(train_df, train_loader, eval_loader, loss_fn, transformer)
@@ -178,7 +267,7 @@ if __name__ == "__main__":
     if IS_WANDB:
         wandb.init(
             project=f"{WANDB_PROJECT_NAME}",
-            name="full_norm_back_try",
+            name="full_norm_exp9_bottleneck",
             config={
                 "batch_size": BATCH_SIZE,
                 "epoch": EPOCH,
