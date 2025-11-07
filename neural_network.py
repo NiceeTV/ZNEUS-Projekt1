@@ -11,11 +11,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 WANDB_PROJECT_NAME = "zneus-project-1"
-IS_WANDB = False
+IS_WANDB = True
 
-EPOCH = 128
-BATCH_SIZE = 512
-LR = 0.004
+EPOCH = 50
+BATCH_SIZE = 128
+LR = 0.001
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Device used: {device}")
@@ -52,55 +52,105 @@ class SimpleNN(nn.Module):
 
 def get_inverse_transformed(y, y_transformer=None):
     if y_transformer is not None:
-        y = y.cpu().numpy()
-        y = y_transformer(y)
+        y = y.cpu().numpy().reshape(-1, 1)
+        y = y_transformer.inverse_transform(y)
         return torch.tensor(y, dtype=torch.float32, device=device)
     return y
 
-def evaluate(eloader: DataLoader, model, loss_fn, y_transformer=None):
+
+def evaluate(eloader: DataLoader, model, loss_fn, y_transformer=None, is_test=False):
     model.eval()
     total_test_loss = 0
+    total_test_loss_original = 0
+    num_of_batches = len(eloader)
+
+    mse_losses, rmse_losses = [], [] #for test only
+
     with torch.no_grad():
-        for X, y in eloader:
+        if is_test:
+            print("\n====TESTING====")
+
+        for index, (X, y) in enumerate(eloader):
             X, y = X.to(device), y.to(device)
             y_pred = model(X)
+
+            loss_transformed = loss_fn(y_pred, y).item()
+            mse_losses.append(loss_transformed)
+            total_test_loss += loss_transformed
+
             y_pred = get_inverse_transformed(y_pred, y_transformer)
             y = get_inverse_transformed(y, y_transformer)
-            total_test_loss += loss_fn(y_pred, y).item()
-    return total_test_loss / len(eloader)
+
+            loss_original = loss_fn(y_pred, y).item()
+            total_test_loss_original += loss_original
+            if is_test:
+                rmse = loss_original ** 0.5
+                rmse_losses.append(rmse)
+
+                print(f"Test eval: Batch {index + 1:03d}: MSE={loss_transformed:.4f}, RMSE={rmse:.4f}")
+
+    return total_test_loss/num_of_batches, total_test_loss_original/num_of_batches, mse_losses, rmse_losses, num_of_batches
 
 
-def train(train: CSVDataset, train_loader: DataLoader, eval_loader: DataLoader, loss_fn, reverse_transform=None) -> (any, List[float], List[float]):
+def train(train: CSVDataset, train_loader: DataLoader, eval_loader: DataLoader, loss_fn, transformer=None) -> (any, List[float], List[float]):
     model = SimpleNN(train.X.shape[1]).to(device)
     optimizer = optim.Adam(model.parameters(), lr=LR)
-    train_losses = []
-    eval_losses = []
+    train_mse, eval_mse = [], []
+    train_rmse, eval_rmse = [], []
 
+    print("\n====TRAINING====")
     for epoch in range(EPOCH):
         model.train()
-        total_train_loss = 0
+        total_train_mse = 0
+        total_train_rmse = 0
+
         for X, y in train_loader:
             X, y = X.to(device), y.to(device)
             optimizer.zero_grad()
+
+            #predict y
             y_pred = model(X)
+
+            #calculate loss
             loss = loss_fn(y_pred, y)
+            total_train_mse += loss.item()
+
+            #backward pass
             loss.backward()
             optimizer.step()
             
-            # calculate non-normalized loss, for logging
+            #calculate non-normalized loss, for logging
             with torch.no_grad():
-                y_orig = get_inverse_transformed(y.detach(), reverse_transform)
-                y_pred_orig = get_inverse_transformed(y_pred.detach(), reverse_transform)
-                total_train_loss += loss_fn(y_pred_orig, y_orig).item()
-        avg_train_loss = total_train_loss / len(train_loader)
-        
-        train_losses.append(avg_train_loss)
-        eval_losses.append(evaluate(eval_loader, model, loss_fn, reverse_transform))
+                #inverse transform predicted and true y values
+                y_orig = get_inverse_transformed(y.detach(), transformer)
+                y_pred_orig = get_inverse_transformed(y_pred.detach(), transformer)
+
+                #calculate mse and rmse from results
+                mse = loss_fn(y_pred_orig, y_orig).item()
+                rmse = mse ** 0.5
+
+                total_train_rmse += rmse
+
+        #average train mse/rmse per epoch
+        avg_train_mse = total_train_mse / len(train_loader)
+        avg_train_rmse = total_train_rmse / len(train_loader)
+
+        #test on eval set
+        eval_mse_e, eval_mse_original, _, _, _ = evaluate(eval_loader, model, loss_fn, transformer)
+        eval_rmse_e = eval_mse_original ** 0.5
+
+        #add to arrays
+        train_mse.append(avg_train_mse)
+        eval_mse.append(eval_mse_e)
+        train_rmse.append(avg_train_rmse)
+        eval_rmse.append(eval_rmse_e)
+
+        print(f"Epoch {epoch+1:03d}: train RMSE={avg_train_rmse:.4f}, eval RMSE={eval_rmse_e:.4f}")
     
-    return (model, train_losses, eval_losses)
+    return model, train_mse, eval_mse, train_rmse, eval_rmse
 
 
-def get_datasets(path: str) -> List[pd.DataFrame]:
+def get_datasets(path: str) -> List[CSVDataset]:
     return [
         CSVDataset(f"{path}/train.csv"),
         CSVDataset(f"{path}/test.csv"),
@@ -108,17 +158,20 @@ def get_datasets(path: str) -> List[pd.DataFrame]:
     ]
 
 
-def _main(path: str, reverse_transform):
+def _main(path: str, transformer):
     train_df, test_df, eval_df = get_datasets(path)
     train_loader = DataLoader(train_df, batch_size=BATCH_SIZE, shuffle=True)
     test_loader = DataLoader(test_df, batch_size=BATCH_SIZE, shuffle=True)
     eval_loader = DataLoader(eval_df, batch_size=BATCH_SIZE, shuffle=True)
 
     loss_fn = nn.MSELoss()
-    model, train_loss, eval_loss = train(train_df, train_loader, eval_loader, loss_fn, reverse_transform)
-    test_loss = evaluate(test_loader, model, loss_fn, reverse_transform)
+    model, train_mse, eval_mse, train_rmse, eval_rmse = train(train_df, train_loader, eval_loader, loss_fn, transformer)
 
-    return train_loss, eval_loss, test_loss
+    #evaluate test dataset, unseen data
+    test_mse, test_mse_original, test_mse_losses, test_rmse_losses, test_batches = evaluate(test_loader, model, loss_fn, transformer, is_test=True)
+    test_rmse = test_mse_original ** 0.5
+
+    return train_mse, eval_mse, train_rmse, eval_rmse, test_mse, test_rmse, test_mse_losses, test_rmse_losses, test_batches
 
 if __name__ == "__main__":
     path = "data/transformed/full_features"
@@ -136,27 +189,72 @@ if __name__ == "__main__":
         )
     
     target_transformer = joblib.load(f"{path}/house_value_scaler.pkl")
-    def reverse_transform(val):
-        return target_transformer.inverse_transform(val)
-    tr_loss, ev_loss, te_loss = _main(path, reverse_transform)
+
+    tr_mse, ev_mse, tr_rmse, ev_rmse, te_mse, te_rmse, te_mse_losses, te_rmse_losses, test_batches = _main(path, target_transformer)
     
     if IS_WANDB:
-        for epoch, (tr_loss, ev_loss) in enumerate(zip(tr_loss, ev_loss), 1):
+        for epoch, (mse_t, mse_e, rmse_t, rmse_e) in enumerate(zip(tr_mse, ev_mse, tr_rmse, ev_rmse), 1):
             wandb.log({
                 "epoch": epoch,
-                "train_loss": tr_loss,
-                "eval_loss": ev_loss
+                "train_MSE": mse_t,
+                "eval_MSE": mse_e,
+                "train_RMSE": rmse_t,
+                "eval_RMSE": rmse_e,
             })
-        wandb.log({"test_loss": te_loss})
+
+
+        for batch in range(1, test_batches+1):
+            wandb.log({
+                "batch": batch,
+                "test_MSE": te_mse_losses[batch-1],
+                "test_RMSE": te_rmse_losses[batch-1]
+            })
+
         wandb.finish()
-    
-    print("Training loss: ", te_loss)
+
+    print(f"Test RMSE: {te_rmse:.4f}")
+
+    #plot mse losses
     plt.figure(figsize=(8, 5))
-    plt.plot(range(1, len(tr_loss) + 1), tr_loss, label="Training Loss", linewidth=2)
-    plt.plot(range(1, len(ev_loss) + 1), ev_loss, label="Evaluation Loss", linewidth=2)
-    plt.title("Training and Evaluation Loss Over Epochs")
+    plt.plot(range(1, len(tr_mse) + 1), tr_mse, label="Training MSE", linewidth=2)
+    plt.plot(range(1, len(ev_mse) + 1), ev_mse, label="Evaluation MSE", linewidth=2)
+    plt.title("Training, Evaluation MSE Over Epochs")
     plt.xlabel("Epoch")
-    plt.ylabel("Loss")
+    plt.ylabel("MSE")
+    plt.legend()
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.tight_layout()
+    plt.show()
+
+    #plot rmse - real losses in €
+    plt.figure(figsize=(8, 5))
+    plt.plot(range(1, len(tr_rmse) + 1), tr_rmse, label="Training RMSE", linewidth=2)
+    plt.plot(range(1, len(ev_rmse) + 1), ev_rmse, label="Evaluation RMSE", linewidth=2)
+    plt.title("Training, Evaluation RMSE Over Epochs")
+    plt.xlabel("Epoch")
+    plt.ylabel("RMSE (€)")
+    plt.legend()
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.tight_layout()
+    plt.show()
+
+    #test plots - mse
+    plt.figure(figsize=(8, 5))
+    plt.plot(range(1, test_batches + 1), te_mse_losses, label="Test MSE", linewidth=2)
+    plt.title("Test MSE Over Batches")
+    plt.xlabel("Epoch")
+    plt.ylabel("MSE")
+    plt.legend()
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.tight_layout()
+    plt.show()
+
+    #test plots - rmse
+    plt.figure(figsize=(8, 5))
+    plt.plot(range(1, test_batches + 1), te_rmse_losses, label="Test RMSE", linewidth=2)
+    plt.title("Test RMSE Over Batches")
+    plt.xlabel("Epoch")
+    plt.ylabel("RMSE (€)")
     plt.legend()
     plt.grid(True, linestyle="--", alpha=0.6)
     plt.tight_layout()
