@@ -1,0 +1,13 @@
+{
+    "best_rmse": 53968.44942545371,
+    "config": {
+        "activation": "LeakyReLU(0.1)",
+        "batch_size": 64,
+        "epoch": 50,
+        "lr": 0.001,
+        "loss_fn": "MSELoss",
+        "dataset_path": "data/transformed/full_features",
+        "optimizer": "Adam",
+        "weight_decay": 0
+    }
+}
